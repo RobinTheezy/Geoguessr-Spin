@@ -1,0 +1,26 @@
+{
+  "manifest_version": 3,
+  "name": "GeoGuessr Spaßmodi (private Spiele)",
+  "version": "0.3.0",
+  "description": "Spaßmodi für private Party-Spiele unter Freunden: Tipp-Kiste, Heiß & Kalt, Schlüsselloch, Nebel, Filter-Roulette, Blinde Karte, Schwindel – und Flüche an Mitspieler schicken.",
+  "content_scripts": [
+    {
+      "matches": ["https://www.geoguessr.com/*"],
+      "js": [
+        "src/core.js",
+        "src/ui.js",
+        "src/modes/kiste.js",
+        "src/modes/hotcold.js",
+        "src/modes/keyhole.js",
+        "src/modes/fog.js",
+        "src/modes/filters.js",
+        "src/modes/blindmap.js",
+        "src/modes/dizzy.js",
+        "src/curses.js",
+        "src/main.js"
+      ],
+      "run_at": "document_start",
+      "world": "MAIN"
+    }
+  ]
+}
