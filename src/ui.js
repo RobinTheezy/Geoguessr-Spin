@@ -154,8 +154,10 @@
     }
   }
 
+  // section = { render(container), order? } – kleinere order steht weiter oben (Standard 0).
   function addSection(section) {
     sections.push(section);
+    sections.sort((a, b) => (a.order ?? 0) - (b.order ?? 0));
   }
 
   let toastElement = null;

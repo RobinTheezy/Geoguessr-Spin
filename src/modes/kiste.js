@@ -6,6 +6,8 @@
 
   const VARIANT_KEY = 'gg-handicap-mode';
   const COOLDOWN_MS = { normal: 20000, crazy: 10000 };
+  // Mit Muenzsystem: Preis pro Kiste statt Wartezeit (Crazy ist billiger, hat aber mehr Flueche).
+  const PRICE = { normal: 15, crazy: 10 };
   const SPIN_MS = 5000;
   const RESULT_MS = 2800;
   const CARD_WIDTH = 110;
@@ -139,7 +141,17 @@
     hintShapes: [],
     shiftGuess: false,
     message: '',
+    paid: 0, // Preis der laufenden Kiste, falls sie scheitert
   };
+
+  function useCoins() {
+    return !!G.coins?.active();
+  }
+
+  function refundSpin() {
+    if (state.paid) G.coins.earn(state.paid, 'Kiste zurück');
+    state.paid = 0;
+  }
 
   function activeCatalog() {
     return state.variant === 'crazy' ? CRAZY_CATALOG : CATALOG;
@@ -530,7 +542,14 @@
       if (['country', 'region', 'county'].includes(winner.id)) loadBoundary(winner, G.target);
       drawHintShapes();
       state.spinning = false;
-      state.nextCaseAt = winner.id === 'turbo' ? 0 : Date.now() + COOLDOWN_MS[state.variant];
+      if (useCoins()) {
+        // Turbo erstattet mit Muenzen den Kistenpreis.
+        if (winner.id === 'turbo' && state.paid) G.coins.earn(state.paid, 'Turbo');
+        state.nextCaseAt = 0;
+      } else {
+        state.nextCaseAt = winner.id === 'turbo' ? 0 : Date.now() + COOLDOWN_MS[state.variant];
+      }
+      state.paid = 0;
       if (winner.tier === 'curse') applyCurse(winner, G.roundToken);
       G.render();
       window.setTimeout(() => {
@@ -542,6 +561,11 @@
   async function openCase() {
     const target = G.target;
     if (!target || state.spinning || state.exhausted || cooldownSeconds() > 0) return;
+    state.paid = 0;
+    if (useCoins()) {
+      if (!G.coins.spend(PRICE[state.variant], 'Kiste')) return;
+      state.paid = PRICE[state.variant];
+    }
     state.spinning = true;
     state.message = '';
     state.spinToken += 1;
@@ -555,6 +579,7 @@
       } catch {
         if (token !== state.spinToken) return;
         state.spinning = false;
+        refundSpin();
         state.message = 'Tipps konnten nicht geladen werden.';
         G.render();
         return;
@@ -564,6 +589,7 @@
     if (items.length === 0) {
       state.spinning = false;
       state.exhausted = true;
+      refundSpin();
       G.render();
       return;
     }
@@ -574,6 +600,10 @@
     if (state.exhausted) return 'Alle Tipps gezogen';
     if (state.spinning) return 'Kiste läuft...';
     if (cooldown > 0) return `Nächste Kiste in ${cooldown} s`;
+    if (useCoins()) {
+      const price = PRICE[state.variant];
+      return G.coins.canAfford(price) ? `Kiste öffnen (${price} 🪙)` : `Zu wenig Münzen (${price} 🪙)`;
+    }
     return 'Kiste öffnen';
   }
 
@@ -583,6 +613,7 @@
     state.exhausted = false;
     state.spinning = false;
     state.spinToken += 1;
+    state.paid = 0;
     state.nextCaseAt = 0;
     state.shownCooldown = 0;
     state.arrowOwned = false;
@@ -640,7 +671,8 @@
 
       const cooldown = cooldownSeconds();
       state.shownCooldown = cooldown;
-      ui.button(body, caseLabel(cooldown), openCase, { disabled: !G.target || state.spinning || state.exhausted || cooldown > 0 });
+      const broke = useCoins() && !G.coins.canAfford(PRICE[state.variant]);
+      ui.button(body, caseLabel(cooldown), openCase, { disabled: !G.target || state.spinning || state.exhausted || cooldown > 0 || broke });
 
       if (state.arrowOwned) {
         const label = state.arrowUsed ? 'Pfeil verbraucht' : G.lastClick ? 'Pfeil benutzen (1x)' : 'Erst auf Karte klicken';
@@ -651,6 +683,10 @@
         state.variant = state.variant === 'crazy' ? 'normal' : 'crazy';
         ui.save(VARIANT_KEY, state.variant);
         state.exhausted = false;
+        if (useCoins()) {
+          G.render();
+          return;
+        }
         const limit = Date.now() + COOLDOWN_MS[state.variant];
         if (state.nextCaseAt > limit) state.nextCaseAt = limit;
         G.render();

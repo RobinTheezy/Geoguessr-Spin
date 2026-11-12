@@ -28,9 +28,10 @@
   window.__ggx = G;
 
   // ---------- Globale Hooks (fuer Funktionen, die unabhaengig vom Modus laufen, z. B. Flueche) ----------
-  // round(target), active(), inactive(), tick(), guess(data) -> geaenderte Daten oder undefined
+  // round(target), active(), inactive(), tick(), guess(data) -> geaenderte Daten oder undefined,
+  // sent(data): endgueltig abgeschickter Guess, data(json): jede Spiel-API-Antwort (z. B. fuer Punktzahlen)
 
-  const hooks = { round: [], active: [], inactive: [], tick: [], guess: [] };
+  const hooks = { round: [], active: [], inactive: [], tick: [], guess: [], sent: [], data: [] };
 
   G.on = (name, fn) => {
     hooks[name].push(fn);
@@ -159,6 +160,19 @@
     return id;
   };
 
+  // Eigenes GeoGuessr-Profil (/api/v3/profiles -> user), einmal geladen. null, wenn nicht eingeloggt.
+  let profilePromise = null;
+  G.profile = () => {
+    profilePromise ??= originalFetch('https://www.geoguessr.com/api/v3/profiles', { credentials: 'include' })
+      .then((response) => (response.ok ? response.json() : null))
+      .then((data) => data?.user ?? null)
+      .catch(() => {
+        profilePromise = null; // Spaeter erneut versuchen.
+        return null;
+      });
+    return profilePromise;
+  };
+
   // Spiel-ID eines Einzelspiels (/game/<id>), sonst null.
   G.singleGameId = () => {
     const [, type, id] = gamePath().split('/');
@@ -260,6 +274,7 @@
 
   function acceptGameData(data) {
     if (!isActive()) return;
+    if (G.active) emit('data', data);
     const target = readTarget(findGameData(data));
     if (!target) return;
     if (G.target && G.target.lat === target.lat && G.target.lng === target.lng) return;
@@ -303,6 +318,7 @@
       data = fromMode;
       changed = true;
     }
+    emit('sent', data);
     return changed ? JSON.stringify(data) : body;
   }
 

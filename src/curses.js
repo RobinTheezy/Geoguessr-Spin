@@ -14,6 +14,8 @@
   const CHARGES_PER_ROUND = 1;
   const SHIFT_KM = 30;
   const RECONNECT_MS = [1000, 2000, 5000, 10000, 20000];
+  // Mit Muenzen: ein gekaufter Fluch ist fuer den Rest der Runde und die naechste Runde gesperrt.
+  const LOCK_ROUNDS = 2;
 
   // Uebungsmodus fuer Einzelspiele: ein Test-Bot verbindet sich als zweiter Spieler ueber den echten Server.
   const PRACTICE_KEY = 'ggx-fluch-practice';
@@ -24,16 +26,17 @@
   const HIDE_LABELS = [{ elementType: 'labels', stylers: [{ visibility: 'off' }] }];
 
   // pano: Panorama-Effekt · keyhole: Lichtkegel · labels: Karte ohne Namen · shift: naechster Guess verrutscht
+  // price: Muenzen (nur wenn das Muenzsystem an ist), nach Wirkung gestaffelt.
   const CURSES = {
-    upside: { icon: '🙃', name: 'Kopfstand', seconds: 20, pano: { transform: 'rotate(180deg)' } },
-    mirror: { icon: '🪞', name: 'Spiegel', seconds: 30, pano: { transform: 'scaleX(-1)' } },
-    invert: { icon: '🌈', name: 'Invertiert', seconds: 30, pano: { filter: 'invert(1)' } },
-    blur: { icon: '🌫️', name: 'Nebelwand', seconds: 20, pano: { filter: 'blur(10px)' } },
-    blackout: { icon: '🌑', name: 'Stromausfall', seconds: 8, pano: { filter: 'brightness(0)' } },
-    gray: { icon: '🐼', name: 'Schwarzweiß', seconds: 45, pano: { filter: 'grayscale(1)' } },
-    keyhole: { icon: '🔦', name: 'Schlüsselloch', seconds: 25, keyhole: true },
-    labels: { icon: '🗺️', name: 'Blinde Karte', seconds: 45, labels: true },
-    shift: { icon: '🫨', name: 'Wackelhand', note: `nächster Guess ${SHIFT_KM} km daneben`, shift: true },
+    gray: { icon: '🐼', name: 'Schwarzweiß', seconds: 45, price: 10, pano: { filter: 'grayscale(1)' } },
+    mirror: { icon: '🪞', name: 'Spiegel', seconds: 30, price: 15, pano: { transform: 'scaleX(-1)' } },
+    labels: { icon: '🗺️', name: 'Blinde Karte', seconds: 45, price: 15, labels: true },
+    invert: { icon: '🌈', name: 'Invertiert', seconds: 30, price: 20, pano: { filter: 'invert(1)' } },
+    upside: { icon: '🙃', name: 'Kopfstand', seconds: 20, price: 25, pano: { transform: 'rotate(180deg)' } },
+    blackout: { icon: '🌑', name: 'Stromausfall', seconds: 8, price: 25, pano: { filter: 'brightness(0)' } },
+    blur: { icon: '🌫️', name: 'Nebelwand', seconds: 20, price: 30, pano: { filter: 'blur(10px)' } },
+    shift: { icon: '🫨', name: 'Wackelhand', note: `nächster Guess ${SHIFT_KM} km daneben`, price: 35, shift: true },
+    keyhole: { icon: '🔦', name: 'Schlüsselloch', seconds: 25, price: 40, keyhole: true },
   };
 
   const state = {
@@ -52,8 +55,9 @@
     chargesRound: 0,
     chargesUsed: 0,
     selectedTarget: null,
-    selectedCurse: 'upside',
+    selectedCurse: 'gray',
     feedback: '',
+    pendingPurchase: null, // { curse, price } bis zur Zustellbestaetigung
     // Empfangen
     active: new Map(), // id -> { until, timer }
     shiftGuess: false,
@@ -90,17 +94,10 @@
 
   async function loadIdentity() {
     if (state.identity) return state.identity;
-    try {
-      const response = await G.originalFetch('https://www.geoguessr.com/api/v3/profiles', { credentials: 'include' });
-      if (response.ok) {
-        const { user } = await response.json();
-        if (user?.id) {
-          state.identity = { id: String(user.id).replace(/[^A-Za-z0-9_-]/g, '').slice(0, 64), name: user.nick || 'Spieler' };
-          return state.identity;
-        }
-      }
-    } catch {
-      // Fallback unten.
+    const user = await G.profile();
+    if (user?.id) {
+      state.identity = { id: String(user.id).replace(/[^A-Za-z0-9_-]/g, '').slice(0, 64), name: user.nick || 'Spieler' };
+      return state.identity;
     }
     let fallback = null;
     try {
@@ -305,13 +302,14 @@
         const curse = CURSES[message.curse];
         const target = state.players.find((player) => player.id === message.to)?.name ?? 'Mitspieler';
         state.feedback = message.ok ? `✔ ${curse?.name ?? 'Fluch'} an ${target} geschickt` : `${target} ist nicht mehr da`;
-        if (!message.ok) state.chargesUsed = Math.max(0, state.chargesUsed - 1);
+        if (message.ok) state.pendingPurchase = null;
+        else undoPurchase();
         G.render();
         break;
       }
       case 'error':
         state.feedback = String(message.reason ?? 'Fehler');
-        state.chargesUsed = Math.max(0, state.chargesUsed - 1);
+        undoPurchase();
         G.render();
         break;
       default:
@@ -330,9 +328,43 @@
     return Math.max(0, CHARGES_PER_ROUND - state.chargesUsed);
   }
 
+  function useCoins() {
+    return !!G.coins?.active();
+  }
+
+  // Warum der gewaehlte Fluch gerade nicht kaufbar ist (oder '' wenn doch).
+  function blockedReason(id) {
+    if (!useCoins()) return chargesLeft() > 0 ? '' : 'Diese Runde schon verflucht';
+    const until = G.coins.lockedUntil(`curse-${id}`);
+    if (until) return `🔒 Gesperrt bis Runde ${until}`;
+    if (!G.coins.canAfford(CURSES[id].price)) return `Zu teuer (${CURSES[id].price} 🪙)`;
+    return '';
+  }
+
+  // Fluch kam nicht an: Muenzen zurueck und Sperre aufheben bzw. Ladung zurueckgeben.
+  function undoPurchase() {
+    const purchase = state.pendingPurchase;
+    state.pendingPurchase = null;
+    if (purchase) {
+      G.coins.earn(purchase.price, 'Fluch nicht zugestellt');
+      G.coins.unlock(`curse-${purchase.curse}`);
+    } else {
+      state.chargesUsed = Math.max(0, state.chargesUsed - 1);
+    }
+  }
+
   function sendCurse() {
-    if (!state.connected || !state.selectedTarget || !G.roundNumber || chargesLeft() <= 0) return;
-    state.chargesUsed += 1;
+    if (!state.connected || !state.selectedTarget || !G.roundNumber || blockedReason(state.selectedCurse)) return;
+    if (useCoins()) {
+      const id = state.selectedCurse;
+      const { price } = CURSES[id];
+      if (!G.coins.spend(price, `Fluch ${id}`)) return;
+      G.coins.lock(`curse-${id}`, LOCK_ROUNDS);
+      state.pendingPurchase = { curse: id, price };
+    } else {
+      state.chargesUsed += 1;
+      state.pendingPurchase = null;
+    }
     state.feedback = 'Wird zugestellt …';
     state.socket.send(JSON.stringify({ type: 'curse', to: state.selectedTarget, curse: state.selectedCurse, round: G.roundNumber }));
     G.render();
@@ -513,7 +545,12 @@
       G.render();
     }, { grid: list.length > 3 });
 
-    const options = Object.entries(CURSES).map(([id, curse]) => ({ id, label: `${curse.icon} ${curse.name}` }));
+    const coins = useCoins();
+    const options = Object.entries(CURSES).map(([id, curse]) => {
+      if (!coins) return { id, label: `${curse.icon} ${curse.name}` };
+      const locked = G.coins.lockedUntil(`curse-${id}`);
+      return { id, label: `${curse.icon} ${curse.name} · ${locked ? '🔒' : `${curse.price} 🪙`}` };
+    });
     ui.choice(body, options, state.selectedCurse, (id) => {
       state.selectedCurse = id;
       G.render();
@@ -521,9 +558,12 @@
     const selected = CURSES[state.selectedCurse];
     ui.text(body, selected.seconds ? `${selected.seconds} Sekunden` : selected.note, { className: 'ggx-muted ggx-center' });
 
-    const left = chargesLeft();
-    const label = left === Infinity ? 'Fluch schicken' : left > 0 ? `Fluch schicken (${left} übrig)` : 'Diese Runde schon verflucht';
-    ui.button(body, label, sendCurse, { disabled: left <= 0 || !state.selectedTarget || !G.roundNumber });
+    const blocked = blockedReason(state.selectedCurse);
+    let label;
+    if (blocked) label = blocked;
+    else if (coins) label = `Fluch kaufen (${selected.price} 🪙)`;
+    else label = chargesLeft() === Infinity ? 'Fluch schicken' : `Fluch schicken (${chargesLeft()} übrig)`;
+    ui.button(body, label, sendCurse, { disabled: !!blocked || !state.selectedTarget || !G.roundNumber });
     if (state.feedback) ui.text(body, state.feedback, { className: 'ggx-muted' });
     if (isPractice()) renderPracticeControls(body);
   }
@@ -543,6 +583,7 @@
   G.on('round', () => {
     clearAllCurses();
     state.feedback = '';
+    state.pendingPurchase = null;
     syncConnection();
   });
 
